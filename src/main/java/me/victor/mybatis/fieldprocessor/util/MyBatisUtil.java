@@ -1,5 +1,18 @@
 package me.victor.mybatis.fieldprocessor.util;
 
+import cn.hutool.core.collection.CollUtil;
+import cn.hutool.core.lang.Pair;
+import cn.hutool.core.util.ArrayUtil;
+import cn.hutool.core.util.ClassUtil;
+import cn.hutool.core.util.ReflectUtil;
+import cn.hutool.core.util.StrUtil;
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import lombok.val;
+import me.victor.mybatis.fieldprocessor.annotation.DoProcess;
+import me.victor.mybatis.fieldprocessor.annotation.EnableIntercept;
+
 import org.apache.ibatis.mapping.SqlCommandType;
 import org.apache.ibatis.session.defaults.DefaultSqlSession;
 import org.springframework.core.annotation.AliasFor;
@@ -10,50 +23,29 @@ import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import cn.hutool.core.collection.CollUtil;
-import cn.hutool.core.lang.Pair;
-import cn.hutool.core.lang.SimpleCache;
-import cn.hutool.core.util.ArrayUtil;
-import cn.hutool.core.util.ReflectUtil;
-import cn.hutool.core.util.StrUtil;
-import lombok.AccessLevel;
-import lombok.NoArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import lombok.val;
-import me.victor.mybatis.fieldprocessor.annotation.DoProcess;
-import me.victor.mybatis.fieldprocessor.annotation.EnableProcess;
-import me.victor.mybatis.fieldprocessor.processor.FieldValueProcessor;
-
 /**
- *
+ * MyBatis拦截器工具类
  * @author Victor
  * @date 2021/9/3 14:26
  */
 
 @Slf4j
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
-@SuppressWarnings({"rawtypes", "unchecked", "AlibabaConstantFieldShouldBeUpperCase", "JavadocReference", "AlibabaUndefineMagicConstant"})
-public class EbdcMyBatisUtil {
+@SuppressWarnings({"unchecked", "JavadocReference", "AlibabaUndefineMagicConstant"})
+public class MyBatisUtil {
     /**
-     * Class、字段和注解的映射缓存
+     * 项目包名前缀
      */
-    private static final SimpleCache<String, Map<Field, List<Pair<Annotation, DoProcess>>>> fieldAnnotationCache = new SimpleCache<>();
+    private static final String PKG_PREFIX = "自己项目包名前缀";
     /**
-     * Class和注解处理器实例的缓存
+     * PageHelper、PagingData组合的ID后缀
      */
-    private static final SimpleCache<Class<? extends FieldValueProcessor>, FieldValueProcessor> processorCache = new SimpleCache<>();
+    private static final String PAGE_SUFFIX = "_COUNT";
 
     /**
      * 预处理字段，调用处理逻辑，并提供处理PARAMETER后的回滚操作
@@ -77,7 +69,7 @@ public class EbdcMyBatisUtil {
      */
     public static Optional<Runnable> process(Object obj, SqlCommandType sqlType, ProcessTarget target) {
         val processItems = getObjectCollection(obj).stream()
-                .filter(it -> !EbdcMyBatisUtil.ignoreProcess(it))
+                .filter(it -> !MyBatisUtil.ignoreProcess(it))
                 .collect(Collectors.toList());
         if (processItems.isEmpty()) {
             return Optional.empty();
@@ -89,18 +81,42 @@ public class EbdcMyBatisUtil {
         val restorePairs = processItems.stream()
                 .map(it -> processField(it, sqlType, target))
                 .collect(Collectors.toList());
-        return Optional.of(() -> restorePairs.forEach(it -> EbdcMyBatisUtil.restoreParamFieldValues(it.getKey(), it.getValue())));
+        return Optional.of(() -> restorePairs.forEach(it -> MyBatisUtil.restoreParamFieldValues(it.getKey(), it.getValue())));
     }
 
     /**
-     * 对象是否忽略处理
+     * 判断是否忽略拦截，即DAO层方法是否标记{@link EnableIntercept}注解
+     * @author Victor
+     * @date 2021/10/28 17:12
+     * @param statement MappedStatement
+     * @return boolean
+     */
+    public static boolean ignoreIntercept(String statementId) {
+        if (!StrUtil.startWith(statementId, PKG_PREFIX) || StrUtil.endWith(statementId, PAGE_SUFFIX)) {
+            return true;
+        }
+        return MyBatisCache.obtainIgnore(statementId, () -> {
+            try {
+                val className = statementId.substring(0, statementId.lastIndexOf("."));
+                val methodName = statementId.substring(statementId.lastIndexOf(".") + 1);
+                val method = ReflectUtil.getMethodByName(ClassUtil.loadClass(className), methodName);
+                return method.getAnnotation(EnableIntercept.class) == null;
+            } catch (Exception e) {
+                log.error("判断是否忽略拦截异常", e);
+                return true;
+            }
+        });
+    }
+
+    /**
+     * 对象是否忽略处理，目前只判断是否不为null，取消对象上的注解标记，简化使用
      * @author Victor
      * @date 2021/9/9 14:58
      * @param obj 对象
      * @return boolean
      */
     private static boolean ignoreProcess(Object obj) {
-        return obj == null || obj.getClass().getAnnotation(EnableProcess.class) == null;
+        return obj == null;
     }
 
     /**
@@ -130,7 +146,7 @@ public class EbdcMyBatisUtil {
      */
     private static Map<Field, List<Pair<Annotation, DoProcess>>> findAnnotatedField(Class<?> clazz, ProcessTarget target, SqlCommandType sqlType) {
         val cacheKey = StrUtil.format("{}#{}#{}", clazz, target, sqlType);
-        return fieldAnnotationCache.get(cacheKey, () -> {
+        return MyBatisCache.obtainFieldAnnotation(cacheKey, () -> {
             val map = Arrays.stream(ReflectUtil.getFields(clazz))
                     .filter(it -> AnnotatedElementUtils.hasAnnotation(it, DoProcess.class))
                     .collect(Collectors.toMap(UnaryOperator.identity(),
@@ -197,8 +213,8 @@ public class EbdcMyBatisUtil {
     private static Object processOriginalValue(Object obj, Field field, List<Pair<Annotation, DoProcess>> annotations, Object originalValue) {
         return annotations.stream()
                 .reduce(originalValue,
-                        (tmp, pair) -> processorCache.get(pair.getValue().processor(),
-                                () -> pair.getValue().processor().newInstance()).process(tmp, ProcessorParam.of(obj, field, pair.getKey())),
+                        (tmp, pair) -> MyBatisCache.obtainProcessor(pair.getValue().processor(),
+                                () -> pair.getValue().processor().newInstance()).apply(tmp, ProcessorParam.of(obj, field, pair.getKey())),
                         (o1, o2) -> o1);
     }
 
@@ -210,7 +226,7 @@ public class EbdcMyBatisUtil {
      * @param map Field和原值的映射
      */
     private static void restoreParamFieldValues(Object param, Map<Field, Object> map) {
-        if (EbdcMyBatisUtil.ignoreProcess(param) || CollUtil.isEmpty(map)) {
+        if (MyBatisUtil.ignoreProcess(param) || CollUtil.isEmpty(map)) {
             return;
         }
         map.forEach((k, v) -> ReflectUtil.setFieldValue(param, k, v));
@@ -255,12 +271,12 @@ public class EbdcMyBatisUtil {
      * @return 对象中字段Field和初始值的映射
      */
     private static Pair<Object, Map<Field, Object>> processField(Object obj, SqlCommandType sqlType, ProcessTarget target) {
-        val fieldProcessMap = EbdcMyBatisUtil.findAnnotatedField(obj.getClass(), target, sqlType);
+        val fieldProcessMap = MyBatisUtil.findAnnotatedField(obj.getClass(), target, sqlType);
         val fieldOriginalValueMap = new HashMap<Field, Object>((int) (fieldProcessMap.size() / 0.75 + 1));
         fieldProcessMap.forEach((field, annotations) -> {
             Object originalValue = ReflectUtil.getFieldValue(obj, field);
             fieldOriginalValueMap.put(field, originalValue);
-            Object newValue = EbdcMyBatisUtil.processOriginalValue(obj, field, annotations, originalValue);
+            Object newValue = MyBatisUtil.processOriginalValue(obj, field, annotations, originalValue);
             ReflectUtil.setFieldValue(obj, field, newValue);
         });
         return Pair.of(obj, fieldOriginalValueMap);

@@ -13,7 +13,7 @@ import java.lang.reflect.Field;
  */
 @Data
 @AllArgsConstructor(staticName = "of")
-public class ProcessorParam<A extends Annotation> {
+public class ProcessorParam {
 
     /**
      * 原对象
@@ -28,5 +28,5 @@ public class ProcessorParam<A extends Annotation> {
     /**
      * 原注解
      */
-    private A annotation;
+    private Annotation annotation;
 }

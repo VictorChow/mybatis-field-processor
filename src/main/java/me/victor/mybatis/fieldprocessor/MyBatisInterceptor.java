@@ -1,9 +1,9 @@
 package me.victor.mybatis.fieldprocessor;
 
 import cn.hutool.core.util.ReflectUtil;
-import me.victor.mybatis.fieldprocessor.annotation.DoProcess;
 import lombok.val;
-import me.victor.mybatis.fieldprocessor.util.EbdcMyBatisUtil;
+import me.victor.mybatis.fieldprocessor.annotation.DoProcess;
+import me.victor.mybatis.fieldprocessor.util.MyBatisUtil;
 import me.victor.mybatis.fieldprocessor.util.ProcessTarget;
 
 import org.apache.ibatis.executor.Executor;
@@ -19,29 +19,37 @@ import java.util.Properties;
  * MyBatis拦截器，处理{@link DoProcess}标记的字段
  *
  * @author Victor
- * @date 17/08/25 17:04
+ * @date 2021/8/25 17:04
  */
 @Component
 @Intercepts({
         @Signature(type = Executor.class, method = "update", args = {MappedStatement.class, Object.class}),
         @Signature(type = ResultSetHandler.class, method = "handleResultSets", args = Statement.class)
 })
-public class EbdcMyBatisInterceptor implements Interceptor {
+public class MyBatisInterceptor implements Interceptor {
 
     @Override
     public Object intercept(Invocation invocation) throws Throwable {
         val target = invocation.getTarget();
         if (target instanceof Executor) {
-            val sqlType = ((MappedStatement) invocation.getArgs()[0]).getSqlCommandType();
+            MappedStatement mappedStatement = (MappedStatement) invocation.getArgs()[0];
+            if (MyBatisUtil.ignoreIntercept(mappedStatement.getId())) {
+                return invocation.proceed();
+            }
+            val sqlType = mappedStatement.getSqlCommandType();
             val param = invocation.getArgs()[1];
-            val recover = EbdcMyBatisUtil.process(param, sqlType, ProcessTarget.PARAMETER);
+            val recover = MyBatisUtil.process(param, sqlType, ProcessTarget.PARAMETER);
             val result = invocation.proceed();
             recover.ifPresent(Runnable::run);
             return result;
         } else if (target instanceof ResultSetHandler) {
             val result = invocation.proceed();
-            val sqlType = ((MappedStatement) ReflectUtil.getFieldValue(target, "mappedStatement")).getSqlCommandType();
-            EbdcMyBatisUtil.process(result, sqlType, ProcessTarget.RESULT);
+            MappedStatement mappedStatement = (MappedStatement) ReflectUtil.getFieldValue(target, "mappedStatement");
+            if (MyBatisUtil.ignoreIntercept(mappedStatement.getId())) {
+                return result;
+            }
+            val sqlType = mappedStatement.getSqlCommandType();
+            MyBatisUtil.process(result, sqlType, ProcessTarget.RESULT);
             return result;
         }
         return invocation.proceed();
